@@ -9,7 +9,7 @@ import {
 import LZString from 'lz-string';
 
 const STORAGE_KEY = 'workflow-board-v1';
-const VERSION = '1.10';
+const VERSION = '1.11';
 const URL_PARAM = 'd';
 const URL_SAFE_LIMIT = 8000; // URLの実用上限（8KB目安）
 
@@ -111,20 +111,26 @@ const makeDemoBoard = () => {
     id: uid(), from: nameToId[from], to: nameToId[to], label
   }));
   const noteDefs = [
-    { text: '月末締め\n翌月5日までに送付', attachedName: '請求書.pdf' },
-    { text: '顧客コード欄は\nVLOOKUPで自動',  attachedName: '請求書テンプレ.docx' },
+    { text: '【更新頻度】\n月初に新規分追加\n削除は論理削除で',                    attachedName: '顧客台帳.xlsx' },
+    { text: '【元データ】\nタイムカードから転記\n15分単位で丸め',                  attachedName: '稼働時間.xlsx' },
+    { text: '【自動化】\n顧客コードはVLOOKUP\n単価はマスタ参照',                 attachedName: '請求書テンプレ.docx' },
+    { text: '⚠ 月末締め\n翌月5日までに送付\n遅延NG（取引継続に影響）',           attachedName: '請求書.pdf' },
+    { text: '【保管ルール】\n3年分をクラウドに\nそれ以前は外付けHDD',            attachedName: '送信済フォルダ' },
+    { text: '【入金確認】\n毎週月曜に照合\n未入金は督促リストへ',                 attachedName: '会計ソフト' },
   ];
-  const notes = noteDefs.map(n => {
+  const notes = noteDefs.map((n, i) => {
     const card = cards.find(c => c.name === n.attachedName);
+    // 複数メモが同じカードにあっても重ならないよう、個別に y をずらす
+    const sameCardNotes = noteDefs.slice(0, i).filter(x => x.attachedName === n.attachedName).length;
     return {
       id: uid(),
       text: n.text,
       attachedTo: card ? card.id : null,
-      x: (card?.x || 300) + 220,
-      y: card?.y || 100,
+      x: (card?.x || 300) + 230,
+      y: (card?.y || 100) + sameCardNotes * 110,
     };
   });
-  return { id: uid(), name: 'DEMO', cards, notes, connections };
+  return { id: uid(), name: 'DEMO', cards, notes, connections, collapsedCardIds: [] };
 };
 
 // 5ステップのガイドツアー
@@ -166,6 +172,13 @@ export default function App() {
   const cards = activeBoard.cards;
   const notes = activeBoard.notes;
   const connections = activeBoard.connections;
+  const collapsedIds = new Set(activeBoard.collapsedCardIds || []);
+
+  // カードIDごとの紐付きメモ数
+  const notesCountByCard = {};
+  notes.forEach(n => {
+    if (n.attachedTo) notesCountByCard[n.attachedTo] = (notesCountByCard[n.attachedTo] || 0) + 1;
+  });
 
   // setter: active board に書き込むラッパー（既存のコードが setCards/setNotes/setConnections を使うため互換保持）
   const setCards = (updater) => setBoards(bs => bs.map(b =>
@@ -489,6 +502,27 @@ export default function App() {
     });
   };
 
+  // --- Notes collapse (per-card) ---
+  const toggleCardNotes = (cardId) => {
+    setBoards(bs => bs.map(b => {
+      if (b.id !== activeBoard.id) return b;
+      const current = new Set(b.collapsedCardIds || []);
+      if (current.has(cardId)) current.delete(cardId);
+      else current.add(cardId);
+      return { ...b, collapsedCardIds: [...current] };
+    }));
+  };
+  const toggleAllNotes = () => {
+    setBoards(bs => bs.map(b => {
+      if (b.id !== activeBoard.id) return b;
+      const attachedCardIds = [...new Set(b.notes.filter(n => n.attachedTo).map(n => n.attachedTo))];
+      if (attachedCardIds.length === 0) return b;
+      const current = new Set(b.collapsedCardIds || []);
+      const allCollapsed = attachedCardIds.every(id => current.has(id));
+      return { ...b, collapsedCardIds: allCollapsed ? [] : attachedCardIds };
+    }));
+  };
+
   // --- Board (page) management ---
   const switchBoard = (id) => {
     if (id === activeBoardId) return;
@@ -697,9 +731,13 @@ export default function App() {
   };
 
   const slideNoteVisible = (note) => {
-    if (!slideshow) return true;
-    if (slideshow.phase === 'overview') return false;
-    return note.attachedTo === slideshow.order[slideshow.step];
+    if (slideshow) {
+      if (slideshow.phase === 'overview') return false;
+      return note.attachedTo === slideshow.order[slideshow.step];
+    }
+    // 通常時：カード折りたたみ状態なら非表示
+    if (note.attachedTo && collapsedIds.has(note.attachedTo)) return false;
+    return true;
   };
 
   // --- Guided tour ---
@@ -1455,6 +1493,33 @@ export default function App() {
                         )}
                       </div>
                     </div>
+                    {(() => {
+                      const nc = notesCountByCard[card.id] || 0;
+                      if (nc === 0 || slideshow) return null;
+                      const isCollapsed = collapsedIds.has(card.id);
+                      return (
+                        <button
+                          style={{
+                            ...styles.noteBadge,
+                            background: isCollapsed ? '#fef3a3' : '#fafaf6',
+                            borderColor: isCollapsed ? '#e0cc74' : '#d4d4ce',
+                            color: isCollapsed ? '#665818' : '#a08a1e',
+                          }}
+                          title={isCollapsed
+                            ? `メモ${nc}件を開く`
+                            : `メモ${nc}件を畳む`}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelected({ kind: 'card', id: card.id });
+                            toggleCardNotes(card.id);
+                          }}
+                        >
+                          <StickyNote size={11} />
+                          <span style={styles.noteBadgeCount}>{nc}</span>
+                        </button>
+                      );
+                    })()}
                     {card.link && !slideshow && (
                       <button style={styles.openBtn} title="リンクを開く"
                         onMouseDown={(e) => e.stopPropagation()}
@@ -1473,24 +1538,29 @@ export default function App() {
               const visible = slideNoteVisible(note);
               const spotlighted = slideshow?.phase === 'detail'
                 && note.attachedTo === slideshow.order[slideshow.step];
+              // slideshow の非表示は完全に描画しない／折りたたみはアニメ付きで非表示
               if (slideshow && !visible) return null;
+              const collapsed = !slideshow && !visible;
               return (
                 <div key={note.id}
                   style={{
                     ...styles.note, left: note.x, top: note.y,
                     outline: isSel ? '2px solid #2b5d6b' : 'none', outlineOffset: '2px',
-                    cursor: slideshow ? 'default' : (isEditing ? 'text' : 'grab'),
-                    transform: spotlighted
-                      ? 'rotate(0deg) scale(1.1)'
-                      : (isEditing ? 'rotate(0deg)' : 'rotate(-0.5deg)'),
+                    cursor: slideshow || collapsed ? 'default' : (isEditing ? 'text' : 'grab'),
+                    transform: collapsed
+                      ? 'rotate(-6deg) scale(0.25)'
+                      : (spotlighted
+                        ? 'rotate(0deg) scale(1.1)'
+                        : (isEditing ? 'rotate(0deg)' : 'rotate(-0.5deg)')),
                     transformOrigin: 'left top',
+                    opacity: collapsed ? 0 : 1,
                     boxShadow: spotlighted
                       ? '4px 6px 14px rgba(0,0,0,0.22)'
                       : '2px 3px 6px rgba(0,0,0,0.12)',
                     transition: slideshow
                       ? 'transform 0.35s ease, box-shadow 0.35s ease, opacity 0.35s ease'
-                      : 'none',
-                    pointerEvents: slideshow ? 'none' : 'auto',
+                      : 'transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.22s ease',
+                    pointerEvents: (slideshow || collapsed) ? 'none' : 'auto',
                   }}
                   onMouseDown={slideshow ? undefined : (e) => {
                     if (isEditing) { e.stopPropagation(); return; }
@@ -1641,6 +1711,27 @@ export default function App() {
         <button onClick={zoomFit} style={styles.zoomBtn} title="全体にフィット (F)">
           <Maximize2 size={14} />
         </button>
+        {(() => {
+          const attachedCardIds = [...new Set(notes.filter(n => n.attachedTo).map(n => n.attachedTo))];
+          if (attachedCardIds.length === 0) return null;
+          const allCollapsed = attachedCardIds.length > 0 && attachedCardIds.every(id => collapsedIds.has(id));
+          return (
+            <>
+              <span style={styles.zoomSeparator} />
+              <button
+                onClick={toggleAllNotes}
+                style={{
+                  ...styles.zoomBtn,
+                  background: allCollapsed ? '#fef3a3' : 'transparent',
+                  color: allCollapsed ? '#665818' : '#444',
+                }}
+                title={allCollapsed ? '全メモを開く' : '全メモを畳む'}
+              >
+                <StickyNote size={14} />
+              </button>
+            </>
+          );
+        })()}
       </div>
 
       {slideshow && (() => {
@@ -2215,6 +2306,22 @@ const styles = {
     borderRadius: 4, cursor: 'pointer', color: '#222',
     fontSize: 12, fontFamily: "'IBM Plex Mono', monospace",
     fontWeight: 500,
+  },
+  zoomSeparator: {
+    width: 1, height: 18, background: '#e0e0d8', margin: '0 2px',
+  },
+  noteBadge: {
+    display: 'inline-flex', alignItems: 'center', gap: 3,
+    padding: '2px 6px',
+    background: '#fafaf6', border: '1px solid #d4d4ce',
+    borderRadius: 10, cursor: 'pointer',
+    fontSize: 11, color: '#a08a1e',
+    marginLeft: 4,
+    fontFamily: "'IBM Plex Sans JP', system-ui, sans-serif",
+  },
+  noteBadgeCount: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 600,
   },
   tabBar: {
     display: 'flex', alignItems: 'flex-end', gap: 2,
