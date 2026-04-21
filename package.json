@@ -1,7 +1,7 @@
 {
   "name": "workflow-board",
   "private": true,
-  "version": "1.8.0",
+  "version": "1.9.0",
   "type": "module",
   "description": "業務フロー可視化ボード（Workflow Board）: Excelや書類のつながりをカード＋接続線で整理する静的Webアプリ",
   "scripts": {

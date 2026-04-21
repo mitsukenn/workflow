@@ -9,7 +9,7 @@ import {
 import LZString from 'lz-string';
 
 const STORAGE_KEY = 'workflow-board-v1';
-const VERSION = '1.8';
+const VERSION = '1.9';
 const URL_PARAM = 'd';
 const URL_SAFE_LIMIT = 8000; // URLの実用上限（8KB目安）
 
@@ -136,6 +136,7 @@ export default function App() {
   const fileInputRef = useRef(null);
   const importInputRef = useRef(null);
   const dragState = useRef(null);
+  const panMovedRef = useRef(false); // パンでドラッグしたかどうか（直後のonClick抑止用）
   const cardsRef = useRef(cards);
   const notesRef = useRef(notes);
 
@@ -628,6 +629,48 @@ export default function App() {
     if (!slideshow) return true;
     if (slideshow.phase === 'overview') return false;
     return note.attachedTo === slideshow.order[slideshow.step];
+  };
+
+  // --- Pan (drag empty area to move view) ---
+  const handlePanMouseDown = (e) => {
+    if (e.button !== 0) return;
+    const t = e.target;
+    // 空いている場所（scrollArea自身・wrapper・canvas）だけ対象
+    const isEmpty = t === scrollRef.current
+      || t === canvasRef.current
+      || t?.dataset?.canvasWrapper === '1';
+    if (!isEmpty) return;
+
+    const s = scrollRef.current;
+    const startX = e.clientX, startY = e.clientY;
+    const startScrollLeft = s.scrollLeft, startScrollTop = s.scrollTop;
+    let moved = false;
+
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+        moved = true;
+        document.body.style.cursor = 'grabbing';
+        document.body.style.userSelect = 'none';
+      }
+      if (moved) {
+        s.scrollLeft = startScrollLeft - dx;
+        s.scrollTop = startScrollTop - dy;
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      if (moved) panMovedRef.current = true;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
   // --- Zoom helpers ---
@@ -1146,7 +1189,9 @@ export default function App() {
       <main style={styles.main}>
         <div
           ref={scrollRef} style={styles.scrollArea}
+          onMouseDown={handlePanMouseDown}
           onClick={(e) => {
+            if (panMovedRef.current) { panMovedRef.current = false; return; }
             if (e.target === e.currentTarget
                 || e.target === canvasRef.current
                 || e.target?.dataset?.canvasWrapper === '1') {
@@ -1739,7 +1784,7 @@ const styles = {
     display: 'inline-flex', alignItems: 'center', gap: 4,
   },
   main: { flex: 1, display: 'flex', overflow: 'hidden' },
-  scrollArea: { flex: 1, overflow: 'auto', position: 'relative' },
+  scrollArea: { flex: 1, overflow: 'auto', position: 'relative', cursor: 'grab' },
   canvas: {
     position: 'relative', width: 4000, height: 3000,
     backgroundImage: `radial-gradient(circle, #e0e0d8 1px, transparent 1px)`,
