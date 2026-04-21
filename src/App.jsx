@@ -3,12 +3,13 @@ import {
   FileSpreadsheet, FileText, FileType, Folder, Link2, File as FileIcon,
   StickyNote, Trash2, X, GitBranch, Upload, Download, Eraser,
   ExternalLink, Paperclip, Save, Sparkles, Copy, Check,
-  Image as ImageIcon, Share2, Home, Play, ChevronLeft, ChevronRight
+  Image as ImageIcon, Share2, Home, Play, ChevronLeft, ChevronRight,
+  ZoomIn, ZoomOut, Maximize2
 } from 'lucide-react';
 import LZString from 'lz-string';
 
 const STORAGE_KEY = 'workflow-board-v1';
-const VERSION = '1.6';
+const VERSION = '1.7';
 const URL_PARAM = 'd';
 const URL_SAFE_LIMIT = 8000; // URLの実用上限（8KB目安）
 
@@ -98,6 +99,8 @@ export default function App() {
   const [shareInfo, setShareInfo] = useState(null); // { url, length, overLimit }
   // スライドショー再生状態: null | { phase: 'overview'|'detail', step: number, order: string[] }
   const [slideshow, setSlideshow] = useState(null);
+  // キャンバスのズーム倍率（0.3〜2.0）
+  const [zoom, setZoom] = useState(1);
 
   const scrollRef = useRef(null);
   const canvasRef = useRef(null);
@@ -185,10 +188,16 @@ export default function App() {
         e.preventDefault();
         deleteSelected();
       }
+      if (!editing) {
+        if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomIn(); return; }
+        if (e.key === '-') { e.preventDefault(); zoomOut(); return; }
+        if (e.key === '0') { e.preventDefault(); zoomReset(); return; }
+        if (e.key === 'f' || e.key === 'F') { e.preventDefault(); zoomFit(); return; }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selected, slideshow]);
+  }, [selected, slideshow, zoom, cards, notes]);
 
   // --- Auto-scroll to current slideshow card ---
   useEffect(() => {
@@ -197,8 +206,8 @@ export default function App() {
     const card = cardsRef.current.find(c => c.id === currentId);
     if (!card) return;
     const s = scrollRef.current;
-    const targetX = card.x - s.clientWidth / 2 + 100;
-    const targetY = card.y - s.clientHeight / 2 + 40;
+    const targetX = card.x * zoom - s.clientWidth / 2 + 100 * zoom;
+    const targetY = card.y * zoom - s.clientHeight / 2 + 40 * zoom;
     s.scrollTo({
       left: Math.max(0, targetX),
       top: Math.max(0, targetY),
@@ -295,8 +304,8 @@ export default function App() {
 
     const onMove = (ev) => {
       const ds = dragState.current; if (!ds) return;
-      const dx = ev.clientX - ds.sx;
-      const dy = ev.clientY - ds.sy;
+      const dx = (ev.clientX - ds.sx) / zoom;
+      const dy = (ev.clientY - ds.sy) / zoom;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) ds.moved = true;
       if (ds.kind === 'card') {
         updateCard(ds.id, { x: ds.ox + dx, y: ds.oy + dy });
@@ -360,7 +369,8 @@ export default function App() {
     if (!e.dataTransfer.files?.length) return;
     const rect = canvasRef.current.getBoundingClientRect();
     handleFiles(e.dataTransfer.files, {
-      x: e.clientX - rect.left, y: e.clientY - rect.top
+      x: (e.clientX - rect.left) / zoom,
+      y: (e.clientY - rect.top) / zoom,
     });
   };
 
@@ -438,6 +448,8 @@ export default function App() {
     }
     const order = computeSlideshowOrder(cards, connections);
     setSelected(null);
+    // 再生前に全体フィットして、後続カードの登場が常に見えるようにする
+    zoomFit();
     setSlideshow({ phase: 'overview', step: 0, order });
   };
 
@@ -497,6 +509,41 @@ export default function App() {
     if (!slideshow) return true;
     if (slideshow.phase === 'overview') return false;
     return note.attachedTo === slideshow.order[slideshow.step];
+  };
+
+  // --- Zoom helpers ---
+  const ZOOM_MIN = 0.3, ZOOM_MAX = 2.0, ZOOM_STEP = 0.1;
+  const setZoomClamped = (z) => setZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z)));
+  const zoomIn = () => setZoomClamped(Math.round((zoom + ZOOM_STEP) * 10) / 10);
+  const zoomOut = () => setZoomClamped(Math.round((zoom - ZOOM_STEP) * 10) / 10);
+  const zoomReset = () => setZoom(1);
+  const zoomFit = () => {
+    if (!scrollRef.current || cards.length === 0) return;
+    const margin = 80;
+    const CARD_W = 200, CARD_H = 80, NOTE_W = 160, NOTE_H = 80;
+    const xs = [
+      ...cards.map(c => c.x), ...cards.map(c => c.x + CARD_W),
+      ...notes.map(n => n.x), ...notes.map(n => n.x + NOTE_W),
+    ];
+    const ys = [
+      ...cards.map(c => c.y), ...cards.map(c => c.y + CARD_H),
+      ...notes.map(n => n.y), ...notes.map(n => n.y + NOTE_H),
+    ];
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const contentW = (maxX - minX) + margin * 2;
+    const contentH = (maxY - minY) + margin * 2;
+    const s = scrollRef.current;
+    const fitZoom = Math.min(s.clientWidth / contentW, s.clientHeight / contentH, 1);
+    const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, fitZoom));
+    setZoom(newZoom);
+    requestAnimationFrame(() => {
+      s.scrollTo({
+        left: Math.max(0, (minX - margin) * newZoom),
+        top: Math.max(0, (minY - margin) * newZoom),
+        behavior: 'smooth',
+      });
+    });
   };
 
   // --- Import: shared across URL-load, paste-modal, file-load ---
@@ -951,11 +998,30 @@ export default function App() {
         <div
           ref={scrollRef} style={styles.scrollArea}
           onClick={(e) => {
-            if (e.target === e.currentTarget || e.target === canvasRef.current) setSelected(null);
+            if (e.target === e.currentTarget
+                || e.target === canvasRef.current
+                || e.target?.dataset?.canvasWrapper === '1') {
+              setSelected(null);
+            }
           }}
         >
           <div
-            ref={canvasRef} style={styles.canvas}
+            data-canvas-wrapper="1"
+            style={{
+              width: 4000 * zoom,
+              height: 3000 * zoom,
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+          <div
+            ref={canvasRef}
+            style={{
+              ...styles.canvas,
+              position: 'absolute', top: 0, left: 0,
+              transform: `scale(${zoom})`,
+              transformOrigin: '0 0',
+            }}
             onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}
           >
             <svg style={styles.svg} width="4000" height="3000">
@@ -1148,6 +1214,7 @@ export default function App() {
               );
             })}
           </div>
+          </div>
         </div>
 
         {selectedItem && (
@@ -1242,6 +1309,22 @@ export default function App() {
           </aside>
         )}
       </main>
+
+      {/* Floating zoom controls */}
+      <div style={styles.zoomControls}>
+        <button onClick={zoomOut} style={styles.zoomBtn} title="縮小 (−)" disabled={zoom <= ZOOM_MIN + 0.01}>
+          <ZoomOut size={14} />
+        </button>
+        <button onClick={zoomReset} style={styles.zoomLabel} title="100%に戻す (0)">
+          {Math.round(zoom * 100)}%
+        </button>
+        <button onClick={zoomIn} style={styles.zoomBtn} title="拡大 (+)" disabled={zoom >= ZOOM_MAX - 0.01}>
+          <ZoomIn size={14} />
+        </button>
+        <button onClick={zoomFit} style={styles.zoomBtn} title="全体にフィット (F)">
+          <Maximize2 size={14} />
+        </button>
+      </div>
 
       {slideshow && (() => {
         const total = slideshow.order.length;
@@ -1728,5 +1811,26 @@ const styles = {
     flex: 1, textAlign: 'center', fontSize: 13, fontWeight: 500,
     padding: '0 8px',
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  zoomControls: {
+    position: 'fixed', right: 16, bottom: 16, zIndex: 400,
+    background: '#fff', border: '1px solid #e6e6df',
+    borderRadius: 8, padding: 4,
+    display: 'flex', alignItems: 'center', gap: 2,
+    boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+  },
+  zoomBtn: {
+    width: 30, height: 28, padding: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'transparent', border: 'none',
+    borderRadius: 4, cursor: 'pointer', color: '#444',
+  },
+  zoomLabel: {
+    minWidth: 48, height: 28, padding: '0 6px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'transparent', border: 'none',
+    borderRadius: 4, cursor: 'pointer', color: '#222',
+    fontSize: 12, fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 500,
   },
 };
