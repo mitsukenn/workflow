@@ -9,7 +9,7 @@ import {
 import LZString from 'lz-string';
 
 const STORAGE_KEY = 'workflow-board-v1';
-const VERSION = '1.9';
+const VERSION = '1.10';
 const URL_PARAM = 'd';
 const URL_SAFE_LIMIT = 8000; // URLの実用上限（8KB目安）
 
@@ -88,6 +88,74 @@ const makeNewBoard = (name, seed = {}) => ({
   connections: seed.connections || [],
 });
 
+// DEMOボード：ツアーで使うサンプル盤面（フリーランスの請求業務）
+const makeDemoBoard = () => {
+  const cardDefs = [
+    { name: '顧客台帳.xlsx',      type: 'excel',  x: 120, y: 120 },
+    { name: '稼働時間.xlsx',      type: 'excel',  x: 120, y: 260 },
+    { name: '請求書テンプレ.docx', type: 'word',   x: 420, y: 190 },
+    { name: '請求書.pdf',         type: 'pdf',    x: 720, y: 190 },
+    { name: '送信済フォルダ',      type: 'folder', x: 1020, y: 120 },
+    { name: '会計ソフト',          type: 'link',   x: 1020, y: 260, link: 'https://www.freee.co.jp/' },
+  ];
+  const cards = cardDefs.map(c => ({ ...c, id: uid(), link: c.link || '' }));
+  const nameToId = Object.fromEntries(cards.map(c => [c.name, c.id]));
+  const connDefs = [
+    ['顧客台帳.xlsx',        '請求書テンプレ.docx', '参照'],
+    ['稼働時間.xlsx',        '請求書テンプレ.docx', '転記'],
+    ['請求書テンプレ.docx',  '請求書.pdf',          'PDF化'],
+    ['請求書.pdf',           '送信済フォルダ',      '保管'],
+    ['請求書.pdf',           '会計ソフト',          '登録'],
+  ];
+  const connections = connDefs.map(([from, to, label]) => ({
+    id: uid(), from: nameToId[from], to: nameToId[to], label
+  }));
+  const noteDefs = [
+    { text: '月末締め\n翌月5日までに送付', attachedName: '請求書.pdf' },
+    { text: '顧客コード欄は\nVLOOKUPで自動',  attachedName: '請求書テンプレ.docx' },
+  ];
+  const notes = noteDefs.map(n => {
+    const card = cards.find(c => c.name === n.attachedName);
+    return {
+      id: uid(),
+      text: n.text,
+      attachedTo: card ? card.id : null,
+      x: (card?.x || 300) + 220,
+      y: card?.y || 100,
+    };
+  });
+  return { id: uid(), name: 'DEMO', cards, notes, connections };
+};
+
+// 5ステップのガイドツアー
+const TOUR_STEPS = [
+  {
+    title: 'ようこそ、Workflow Boardへ 👋',
+    body: 'このツールは、業務の流れを「カード（Excel/書類）」と「矢印」で一枚の絵にまとめるアプリです。右側にサンプル盤面を用意しました。5ステップで主な機能をご案内します（1分で終わります）。',
+    target: null,
+  },
+  {
+    title: 'カードを増やす 📇',
+    body: 'ヘッダの Excel / Word / PDF / フォルダ / リンク ボタンで、業務に登場する「もの」をカードとして配置できます。ファイルをドラッグ&ドロップでも一気に並べられます。',
+    target: '[data-tour-target="cardTypes"]',
+  },
+  {
+    title: '矢印とメモで関係を表現 ➡️',
+    body: '「接続」ボタンで2枚のカードを順にクリック → 矢印が引けます。矢印にはラベル（転記・集計・PDF化など）を付けられます。「メモ」ボタンで付箋を貼って補足も可能です。',
+    target: '[data-tour-target="connectNote"]',
+  },
+  {
+    title: '▶ 再生で"紙芝居"プレゼン 🎬',
+    body: '一番の目玉機能です。業務フローが1枚ずつ順番に登場してから、各カードの詳細が順番にスポットライトされます。クライアントに業務を説明するときに威力抜群。今すぐ押して試してみてください。',
+    target: '[data-tour-target="slideshow"]',
+  },
+  {
+    title: 'URL共有 🔗 & 複数ページ 📑',
+    body: '「共有リンク」ボタンで盤面データをURLに埋め込んで相手に送れます（サーバ不要・ブラウザだけで完結）。上のタブで複数の盤面も管理可能。これで案件ごとに整理できます。',
+    target: '[data-tour-target="share"]',
+  },
+];
+
 export default function App() {
   // 複数ページ対応：boards配列と、現在アクティブなページのID
   const [boards, setBoards] = useState(() => [makeNewBoard('ページ1')]);
@@ -130,6 +198,9 @@ export default function App() {
   const [slideshow, setSlideshow] = useState(null);
   // キャンバスのズーム倍率（0.3〜2.0）
   const [zoom, setZoom] = useState(1);
+  // ガイドツアー: null | { step: 0..TOUR_STEPS.length-1 }
+  const [tour, setTour] = useState(null);
+  const [tourRect, setTourRect] = useState(null);
 
   const scrollRef = useRef(null);
   const canvasRef = useRef(null);
@@ -631,6 +702,47 @@ export default function App() {
     return note.attachedTo === slideshow.order[slideshow.step];
   };
 
+  // --- Guided tour ---
+  const startTour = () => {
+    // DEMOボードを追加して切り替え（既存盤面は保護）
+    const demo = makeDemoBoard();
+    setBoards(bs => [...bs, demo]);
+    setActiveBoardId(demo.id);
+    setSelected(null);
+    setConnectMode(false);
+    setConnectFrom(null);
+    setEditingNoteId(null);
+    setSlideshow(null);
+    setTour({ step: 0 });
+  };
+  const endTour = () => setTour(null);
+  const tourNext = () => setTour(t => {
+    if (!t) return t;
+    if (t.step >= TOUR_STEPS.length - 1) return null;
+    return { step: t.step + 1 };
+  });
+  const tourPrev = () => setTour(t => t && t.step > 0 ? { step: t.step - 1 } : t);
+
+  // ツアーステップの対象要素を計測
+  useEffect(() => {
+    if (!tour) { setTourRect(null); return; }
+    const step = TOUR_STEPS[tour.step];
+    if (!step.target) { setTourRect(null); return; }
+    const measure = () => {
+      const el = document.querySelector(step.target);
+      if (!el) { setTourRect(null); return; }
+      const r = el.getBoundingClientRect();
+      setTourRect({ top: r.top, left: r.left, width: r.width, height: r.height });
+    };
+    measure();
+    const id = setTimeout(measure, 60); // レイアウト確定後に再計測
+    window.addEventListener('resize', measure);
+    return () => {
+      clearTimeout(id);
+      window.removeEventListener('resize', measure);
+    };
+  }, [tour?.step]);
+
   // --- Pan (drag empty area to move view) ---
   const handlePanMouseDown = (e) => {
     if (e.button !== 0) return;
@@ -1060,7 +1172,7 @@ export default function App() {
           <div style={styles.versionTag}>v{VERSION}</div>
         </div>
 
-        <div style={styles.toolGroup}>
+        <div style={styles.toolGroup} data-tour-target="cardTypes">
           {Object.entries(TYPES).map(([key, t]) => {
             const I = t.Icon;
             return (
@@ -1072,7 +1184,7 @@ export default function App() {
           })}
         </div>
 
-        <div style={styles.toolGroup}>
+        <div style={styles.toolGroup} data-tour-target="connectNote">
           <button onClick={addNote} style={styles.actionBtn} title="付箋メモを追加">
             <StickyNote size={16} /> メモ
           </button>
@@ -1106,11 +1218,15 @@ export default function App() {
 
         <div style={styles.toolGroup}>
           <button onClick={startSlideshow}
+            data-tour-target="slideshow"
             style={{ ...styles.actionBtn, color: '#b8470a', borderColor: '#e6c8a8' }}
             title="業務フローをスライドショー再生（1枚ずつ・2フェーズ）">
             <Play size={14} /> 再生
           </button>
-          <button onClick={openShare} style={{ ...styles.actionBtn, color: '#2b5d6b', borderColor: '#b6d1d7' }} title="盤面をURLに埋め込んで共有リンクを作成">
+          <button onClick={openShare}
+            data-tour-target="share"
+            style={{ ...styles.actionBtn, color: '#2b5d6b', borderColor: '#b6d1d7' }}
+            title="盤面をURLに埋め込んで共有リンクを作成">
             <Share2 size={14} /> 共有リンク
           </button>
           <button onClick={exportPng} style={{ ...styles.actionBtn, color: '#1f7a3a', borderColor: '#c2dcc9' }} title="盤面をPNG画像で書き出し（クライアント共有用）">
@@ -1168,6 +1284,9 @@ export default function App() {
           );
         })}
         <button onClick={addBoard} style={styles.tabAdd} title="新しいページを追加">+ 新規</button>
+        <button onClick={startTour} style={styles.tabDemo} title="DEMOページと5ステップのガイドツアーを開始">
+          <Play size={11} /> デモ & 使い方
+        </button>
       </div>
 
       {sharedBannerUrl && (
@@ -1577,6 +1696,72 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ガイドツアー・オーバーレイ */}
+      {tour && (() => {
+        const step = TOUR_STEPS[tour.step];
+        const isLast = tour.step === TOUR_STEPS.length - 1;
+        const isFirst = tour.step === 0;
+        // 吹き出しの位置計算
+        const CARD_W = 360, CARD_H_EST = 220, GAP = 16, MARGIN = 16;
+        let cardStyle;
+        if (tourRect) {
+          const vw = window.innerWidth, vh = window.innerHeight;
+          const centerX = tourRect.left + tourRect.width / 2;
+          let left = Math.max(MARGIN, Math.min(vw - CARD_W - MARGIN, centerX - CARD_W / 2));
+          let top = tourRect.top + tourRect.height + GAP;
+          // 下にはみ出すなら上に
+          if (top + CARD_H_EST + MARGIN > vh) {
+            top = Math.max(MARGIN, tourRect.top - CARD_H_EST - GAP);
+          }
+          cardStyle = { top, left };
+        } else {
+          cardStyle = { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' };
+        }
+        return (
+          <div style={styles.tourRoot}>
+            {/* backdrop: 対象がある場合は box-shadow で穴を作る */}
+            {tourRect ? (
+              <div style={{
+                position: 'fixed',
+                top: tourRect.top - 8, left: tourRect.left - 8,
+                width: tourRect.width + 16, height: tourRect.height + 16,
+                borderRadius: 10,
+                boxShadow: '0 0 0 10000px rgba(15,15,12,0.62), 0 0 0 3px #ffb86b',
+                pointerEvents: 'none',
+                transition: 'all 0.25s ease',
+              }} />
+            ) : (
+              <div style={styles.tourBackdropFull} />
+            )}
+            <div style={{ ...styles.tourCard, ...cardStyle }}>
+              <div style={styles.tourDots}>
+                {TOUR_STEPS.map((_, i) => (
+                  <span key={i} style={{
+                    ...styles.tourDot,
+                    background: i === tour.step ? '#b8470a' : (i < tour.step ? '#e6c8a8' : '#d8d8d0'),
+                    transform: i === tour.step ? 'scale(1.35)' : 'scale(1)',
+                  }} />
+                ))}
+                <span style={styles.tourProgress}>{tour.step + 1} / {TOUR_STEPS.length}</span>
+              </div>
+              <div style={styles.tourTitle}>{step.title}</div>
+              <div style={styles.tourBody}>{step.body}</div>
+              <div style={styles.tourActions}>
+                <button onClick={endTour} style={styles.tourSkipBtn}>スキップ</button>
+                <div style={{ flex: 1 }} />
+                <button onClick={tourPrev} disabled={isFirst}
+                  style={{ ...styles.tourPrevBtn, opacity: isFirst ? 0.35 : 1, cursor: isFirst ? 'not-allowed' : 'pointer' }}>
+                  <ChevronLeft size={14} /> 戻る
+                </button>
+                <button onClick={tourNext} style={styles.tourNextBtn}>
+                  {isLast ? '完了 🎉' : <>次へ <ChevronRight size={14} /></>}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {jsonModal && (
         <div style={styles.modalBackdrop} onClick={() => setJsonModal(null)}>
@@ -2072,5 +2257,68 @@ const styles = {
     border: '1px dashed #c8c8c0', color: '#666',
     cursor: 'pointer', fontSize: 12, marginLeft: 4,
     borderRadius: 4, marginBottom: 4,
+  },
+  tabDemo: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    padding: '6px 12px',
+    background: 'linear-gradient(135deg, #b8470a, #d97706)',
+    border: 'none', color: '#fff',
+    cursor: 'pointer', fontSize: 12, fontWeight: 600,
+    marginLeft: 'auto', marginBottom: 4, borderRadius: 4,
+    boxShadow: '0 2px 6px rgba(184,71,10,0.25)',
+  },
+  tourRoot: {
+    position: 'fixed', inset: 0, zIndex: 2000, pointerEvents: 'none',
+  },
+  tourBackdropFull: {
+    position: 'fixed', inset: 0, background: 'rgba(15,15,12,0.62)',
+    pointerEvents: 'auto',
+  },
+  tourCard: {
+    position: 'fixed',
+    width: 360, maxWidth: 'calc(100vw - 32px)',
+    background: '#fff', borderRadius: 12,
+    padding: '18px 20px',
+    boxShadow: '0 20px 48px rgba(0,0,0,0.32), 0 0 0 1px rgba(184,71,10,0.25)',
+    pointerEvents: 'auto',
+    transition: 'top 0.25s ease, left 0.25s ease',
+  },
+  tourDots: {
+    display: 'flex', alignItems: 'center', gap: 5, marginBottom: 10,
+  },
+  tourDot: {
+    width: 7, height: 7, borderRadius: '50%',
+    transition: 'all 0.25s ease',
+  },
+  tourProgress: {
+    marginLeft: 'auto', fontSize: 11, color: '#999',
+    fontFamily: "'IBM Plex Mono', monospace",
+  },
+  tourTitle: {
+    fontSize: 16, fontWeight: 700, color: '#222', marginBottom: 6,
+  },
+  tourBody: {
+    fontSize: 13, lineHeight: 1.7, color: '#444',
+    marginBottom: 16,
+  },
+  tourActions: {
+    display: 'flex', alignItems: 'center', gap: 6,
+  },
+  tourSkipBtn: {
+    padding: '6px 10px', background: 'transparent',
+    border: 'none', color: '#888', cursor: 'pointer',
+    fontSize: 12, textDecoration: 'underline',
+  },
+  tourPrevBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 3,
+    padding: '7px 12px', background: '#fff',
+    border: '1px solid #d4d4ce', borderRadius: 6,
+    fontSize: 13, color: '#444',
+  },
+  tourNextBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 3,
+    padding: '7px 16px', background: '#b8470a',
+    color: '#fff', border: 'none', borderRadius: 6,
+    cursor: 'pointer', fontSize: 13, fontWeight: 600,
   },
 };
