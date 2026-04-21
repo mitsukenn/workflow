@@ -9,7 +9,7 @@ import {
 import LZString from 'lz-string';
 
 const STORAGE_KEY = 'workflow-board-v1';
-const VERSION = '1.7';
+const VERSION = '1.8';
 const URL_PARAM = 'd';
 const URL_SAFE_LIMIT = 8000; // URLの実用上限（8KB目安）
 
@@ -80,10 +80,39 @@ const decodeUrlParam = (param) => {
   } catch { return null; }
 };
 
+const makeNewBoard = (name, seed = {}) => ({
+  id: uid(),
+  name: name || 'ページ1',
+  cards: seed.cards || [],
+  notes: seed.notes || [],
+  connections: seed.connections || [],
+});
+
 export default function App() {
-  const [cards, setCards] = useState([]);
-  const [notes, setNotes] = useState([]);
-  const [connections, setConnections] = useState([]);
+  // 複数ページ対応：boards配列と、現在アクティブなページのID
+  const [boards, setBoards] = useState(() => [makeNewBoard('ページ1')]);
+  const [activeBoardId, setActiveBoardId] = useState(() => null);
+
+  // 派生値：active board とそのcards/notes/connections
+  const activeBoard = boards.find(b => b.id === activeBoardId) || boards[0];
+  const cards = activeBoard.cards;
+  const notes = activeBoard.notes;
+  const connections = activeBoard.connections;
+
+  // setter: active board に書き込むラッパー（既存のコードが setCards/setNotes/setConnections を使うため互換保持）
+  const setCards = (updater) => setBoards(bs => bs.map(b =>
+    b.id === activeBoard.id
+      ? { ...b, cards: typeof updater === 'function' ? updater(b.cards) : updater }
+      : b));
+  const setNotes = (updater) => setBoards(bs => bs.map(b =>
+    b.id === activeBoard.id
+      ? { ...b, notes: typeof updater === 'function' ? updater(b.notes) : updater }
+      : b));
+  const setConnections = (updater) => setBoards(bs => bs.map(b =>
+    b.id === activeBoard.id
+      ? { ...b, connections: typeof updater === 'function' ? updater(b.connections) : updater }
+      : b));
+
   const [selected, setSelected] = useState(null);
   const [connectMode, setConnectMode] = useState(false);
   const [connectFrom, setConnectFrom] = useState(null);
@@ -115,37 +144,47 @@ export default function App() {
 
   // --- Load from URL or storage on mount ---
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const shared = params.get(URL_PARAM);
-    if (shared) {
-      const data = decodeUrlParam(shared);
-      if (data) {
-        const ok = window.confirm(
-          '共有された盤面を読み込みます。\n現在のローカル盤面は上書きされます。\nよろしいですか？\n\n（キャンセルすると、共有URLのデータは破棄してローカル盤面を開きます）'
-        );
-        if (ok) {
-          applyImportDataDirect(data, 'replace');
-          setSharedBannerUrl(window.location.href);
-          // URL はきれいにする（共有リンクは clipboard にあるので）
-          window.history.replaceState({}, '', window.location.pathname);
-          setLoaded(true);
-          return;
-        } else {
-          // 読まずに URL をクリア
-          window.history.replaceState({}, '', window.location.pathname);
-        }
-      }
-    }
-    // localStorage から読み込み
+    // 1) localStorage から既存のboards（または旧形式）を読み込む
+    let loadedBoards = null;
     const r = storage.get(STORAGE_KEY);
     if (r && r.value) {
       try {
         const d = JSON.parse(r.value);
-        setCards(d.cards || []);
-        setNotes(d.notes || []);
-        setConnections(d.connections || []);
+        if (Array.isArray(d.boards) && d.boards.length > 0) {
+          // 新形式
+          loadedBoards = d.boards;
+        } else if (Array.isArray(d.cards)) {
+          // 旧形式 → ページ1にラップして移行
+          loadedBoards = [makeNewBoard('ページ1', { cards: d.cards, notes: d.notes, connections: d.connections })];
+        }
       } catch { /* ignore */ }
     }
+    if (!loadedBoards || loadedBoards.length === 0) {
+      loadedBoards = [makeNewBoard('ページ1')];
+    }
+    let loadedActiveId = (r && r.value && (() => { try { return JSON.parse(r.value).activeBoardId; } catch { return null; } })()) || loadedBoards[0].id;
+    if (!loadedBoards.find(b => b.id === loadedActiveId)) loadedActiveId = loadedBoards[0].id;
+
+    // 2) URL 共有データがあれば「新しいページ」として追加
+    const params = new URLSearchParams(window.location.search);
+    const shared = params.get(URL_PARAM);
+    if (shared) {
+      const data = decodeUrlParam(shared);
+      if (data && Array.isArray(data.cards)) {
+        const ok = window.confirm(
+          '共有された盤面があります。\n「共有された盤面」という新しいページとして追加しますか？\n\n（キャンセルすると共有データは破棄してローカル盤面だけ開きます）'
+        );
+        if (ok) {
+          const sharedBoard = importDataToNewBoard(data, '共有された盤面');
+          loadedBoards = [...loadedBoards, sharedBoard];
+          loadedActiveId = sharedBoard.id;
+          setSharedBannerUrl(window.location.href);
+        }
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    }
+    setBoards(loadedBoards);
+    setActiveBoardId(loadedActiveId);
     setLoaded(true);
   }, []);
 
@@ -154,12 +193,16 @@ export default function App() {
     if (!loaded) return;
     setSaveStatus('保存中');
     const t = setTimeout(() => {
-      storage.set(STORAGE_KEY, JSON.stringify({ cards, notes, connections }));
+      storage.set(STORAGE_KEY, JSON.stringify({
+        version: 2,
+        boards,
+        activeBoardId,
+      }));
       setSaveStatus('保存済');
       setTimeout(() => setSaveStatus(''), 1200);
     }, 500);
     return () => clearTimeout(t);
-  }, [cards, notes, connections, loaded]);
+  }, [boards, activeBoardId, loaded]);
 
   // --- Keyboard shortcuts ---
   useEffect(() => {
@@ -372,6 +415,82 @@ export default function App() {
       x: (e.clientX - rect.left) / zoom,
       y: (e.clientY - rect.top) / zoom,
     });
+  };
+
+  // --- Board (page) management ---
+  const switchBoard = (id) => {
+    if (id === activeBoardId) return;
+    setActiveBoardId(id);
+    setSelected(null);
+    setConnectMode(false);
+    setConnectFrom(null);
+    setEditingNoteId(null);
+    setSlideshow(null);
+  };
+
+  const addBoard = () => {
+    const newBoard = makeNewBoard(`ページ${boards.length + 1}`);
+    setBoards(bs => [...bs, newBoard]);
+    switchBoard(newBoard.id);
+  };
+
+  const deleteBoard = (id) => {
+    if (boards.length <= 1) {
+      alert('最後のページは削除できません。');
+      return;
+    }
+    const board = boards.find(b => b.id === id);
+    if (!board) return;
+    const hasContent = board.cards.length > 0 || board.notes.length > 0;
+    const msg = hasContent
+      ? `ページ「${board.name}」を削除します。\n（カード${board.cards.length}枚・メモ${board.notes.length}枚が失われます）`
+      : `ページ「${board.name}」を削除します。`;
+    if (!window.confirm(msg + '\nよろしいですか？')) return;
+    setBoards(bs => bs.filter(b => b.id !== id));
+    if (id === activeBoardId) {
+      const remaining = boards.filter(b => b.id !== id);
+      setActiveBoardId(remaining[0].id);
+      setSelected(null);
+    }
+  };
+
+  const renameBoard = (id) => {
+    const board = boards.find(b => b.id === id);
+    if (!board) return;
+    const name = window.prompt('ページ名', board.name);
+    if (name && name.trim()) {
+      setBoards(bs => bs.map(b => b.id === id ? { ...b, name: name.trim() } : b));
+    }
+  };
+
+  // URL共有データから新しいboardを作る（applyImportDataDirectと近いが、stateに直接書き込まない）
+  const importDataToNewBoard = (data, boardName = '共有された盤面') => {
+    const inputCards = data.cards || [];
+    const inputConns = data.connections || [];
+    const inputNotes = data.notes || [];
+    const needsLayout = inputCards.some(c => c.x === undefined || c.y === undefined);
+    const positions = needsLayout ? autoLayout(inputCards, inputConns, 100, 80) : {};
+    const nameToId = {};
+    const newCards = inputCards.map((c, i) => {
+      const id = uid();
+      nameToId[c.name] = id;
+      const pos = (c.x !== undefined && c.y !== undefined)
+        ? { x: c.x, y: c.y }
+        : positions[c.name] || { x: 100 + i * 30, y: 80 + i * 30 };
+      return { id, name: c.name || `カード${i + 1}`, type: c.type || 'other', link: c.link || '', x: pos.x, y: pos.y };
+    });
+    const newConnections = inputConns
+      .filter(conn => nameToId[conn.from] && nameToId[conn.to])
+      .map(conn => ({ id: uid(), from: nameToId[conn.from], to: nameToId[conn.to], label: conn.label || '' }));
+    const newNotes = inputNotes.map((n, i) => {
+      const attachedTo = (n.attachTo || n.attachedTo) ? nameToId[n.attachTo || n.attachedTo] || null : null;
+      let nx, ny;
+      if (n.x !== undefined && n.y !== undefined) { nx = n.x; ny = n.y; }
+      else if (attachedTo) { const card = newCards.find(c => c.id === attachedTo); nx = card.x + 220; ny = card.y; }
+      else { nx = 100 + (i % 4) * 200; ny = 600 + Math.floor(i / 4) * 100; }
+      return { id: uid(), text: n.text || '', attachedTo, x: nx, y: ny };
+    });
+    return { id: uid(), name: boardName, cards: newCards, notes: newNotes, connections: newConnections };
   };
 
   // --- Auto-layout ---
@@ -978,6 +1097,36 @@ export default function App() {
         </div>
       </header>
 
+      {/* ページタブ */}
+      <div style={styles.tabBar}>
+        {boards.map((b) => {
+          const isActive = b.id === activeBoardId;
+          const itemCount = b.cards.length + b.notes.length;
+          return (
+            <div
+              key={b.id}
+              style={{ ...styles.tab, ...(isActive ? styles.tabActive : null) }}
+              onClick={() => switchBoard(b.id)}
+              onDoubleClick={() => renameBoard(b.id)}
+              title="クリック: 切替 / ダブルクリック: 名前変更"
+            >
+              <span style={styles.tabName}>{b.name}</span>
+              {itemCount > 0 && <span style={styles.tabCount}>{itemCount}</span>}
+              {boards.length > 1 && (
+                <button
+                  style={styles.tabCloseBtn}
+                  onClick={(e) => { e.stopPropagation(); deleteBoard(b.id); }}
+                  title="このページを削除"
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+          );
+        })}
+        <button onClick={addBoard} style={styles.tabAdd} title="新しいページを追加">+ 新規</button>
+      </div>
+
       {sharedBannerUrl && (
         <div style={styles.sharedBanner}>
           <Home size={14} />
@@ -1119,7 +1268,9 @@ export default function App() {
                     opacity: ssOpacity,
                     transform: `scale(${ssScale})`,
                     transformOrigin: 'center center',
-                    transition: 'opacity 0.45s ease, transform 0.35s ease, box-shadow 0.3s ease, border-color 0.2s ease',
+                    transition: slideshow
+                      ? 'opacity 0.45s ease, transform 0.35s ease, box-shadow 0.3s ease, border-color 0.2s ease'
+                      : 'none',
                     pointerEvents: slideshow ? 'none' : 'auto',
                   }}
                   onMouseDown={slideshow ? undefined : (e) => startDrag(e, 'card', card.id)}
@@ -1172,7 +1323,9 @@ export default function App() {
                     boxShadow: spotlighted
                       ? '4px 6px 14px rgba(0,0,0,0.22)'
                       : '2px 3px 6px rgba(0,0,0,0.12)',
-                    transition: 'transform 0.35s ease, box-shadow 0.35s ease, opacity 0.35s ease',
+                    transition: slideshow
+                      ? 'transform 0.35s ease, box-shadow 0.35s ease, opacity 0.35s ease'
+                      : 'none',
                     pointerEvents: slideshow ? 'none' : 'auto',
                   }}
                   onMouseDown={slideshow ? undefined : (e) => {
@@ -1832,5 +1985,47 @@ const styles = {
     borderRadius: 4, cursor: 'pointer', color: '#222',
     fontSize: 12, fontFamily: "'IBM Plex Mono', monospace",
     fontWeight: 500,
+  },
+  tabBar: {
+    display: 'flex', alignItems: 'flex-end', gap: 2,
+    padding: '6px 12px 0',
+    background: '#f4f4ed', borderBottom: '1px solid #e6e6df',
+    flexWrap: 'wrap', minHeight: 38,
+  },
+  tab: {
+    display: 'flex', alignItems: 'center', gap: 6,
+    padding: '7px 10px 7px 12px', cursor: 'pointer',
+    fontSize: 12, color: '#555',
+    background: '#ebebe2',
+    borderRadius: '6px 6px 0 0',
+    borderTop: '2px solid transparent',
+    marginBottom: -1,
+    userSelect: 'none',
+  },
+  tabActive: {
+    background: '#fff', color: '#222',
+    borderTop: '2px solid #2b5d6b',
+    fontWeight: 600,
+    boxShadow: '0 -2px 4px rgba(0,0,0,0.04)',
+  },
+  tabName: { maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  tabCount: {
+    fontSize: 10, color: '#999',
+    fontFamily: "'IBM Plex Mono', monospace",
+    background: 'rgba(0,0,0,0.05)',
+    padding: '1px 5px', borderRadius: 8,
+  },
+  tabCloseBtn: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: 16, height: 16, padding: 0,
+    background: 'transparent', border: 'none',
+    color: '#888', cursor: 'pointer', borderRadius: 3,
+    marginLeft: 2,
+  },
+  tabAdd: {
+    padding: '6px 10px', background: 'transparent',
+    border: '1px dashed #c8c8c0', color: '#666',
+    cursor: 'pointer', fontSize: 12, marginLeft: 4,
+    borderRadius: 4, marginBottom: 4,
   },
 };
