@@ -1,0 +1,22 @@
+{
+  "name": "workflow-board",
+  "private": true,
+  "version": "1.6.0",
+  "type": "module",
+  "description": "業務フロー可視化ボード（Workflow Board）: Excelや書類のつながりをカード＋接続線で整理する静的Webアプリ",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "lz-string": "^1.5.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
